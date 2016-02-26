@@ -1,0 +1,157 @@
+---
+title: "project Practical machine learning"
+author: "lipnerova"
+date: "20. unora 2016"
+output: 
+  html_document: 
+    toc: yes
+---
+
+# Abstract
+Velloso _et al._^1^ made publicly available large amount of data about personal activity patterns. They collected data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants performing barbell lifts in 5 different ways. Aim of this report is to predict the manner in which the participants did the exercise using machine learning approach from given datasets (one for training models, one for testing them). Two methods were examined, classification tree and random forests, the latter one performing much better and yielding in perfect prediction of test dataset.
+
+
+^1^ Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. __Qualitative Activity Recognition of Weight Lifting Exercises.__ _Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13)._ Stuttgart, Germany: ACM SIGCHI, 2013.
+
+# Setting the R environment
+```{r, warning=FALSE, message=FALSE}
+library(caret)
+library(rattle)
+library(rpart.plot)
+library(randomForest)
+
+set.seed(987)
+```
+
+# Data obtaining and preparing
+
+## Download and load
+This part downloads the files if they are not present in working directory.
+```{r download, eval=F}
+# download file if needed:
+# wrote by Leonard Greski, I added rm() and write()
+if(!file.exists("pml-training.csv")){
+        dlMethod <- "curl"
+        if(substr(Sys.getenv("OS"),1,7) == "Windows") dlMethod <- "wininet"
+        url <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+        download.file(url,destfile='pml-training.csv',method=dlMethod,mode="wb")
+        rm(dlMethod, url)
+        write(date(), "time_downloaded.txt")
+}
+if(!file.exists("pml-testing.csv")){
+        dlMethod <- "curl"
+        if(substr(Sys.getenv("OS"),1,7) == "Windows") dlMethod <- "wininet"
+        url <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+        download.file(url,destfile='pml-testing.csv',method=dlMethod,mode="wb")
+        rm(dlMethod, url)
+        write(date(), "time_downloaded.txt")
+        }
+```
+This part loads the data into R environment. Training dataset is the __a__, original testing dataset is the __b__.
+```{r loading, warning=F, message=F}
+#read in data, treat empty values as NA
+b <- read.csv("pml-testing.csv", na.strings=c("NA",""), header=TRUE) #test dataset, put aside
+a <- read.csv("pml-training.csv", na.strings=c("NA",""), header=TRUE) #train dataset, to play with 
+```
+
+## Data cleaning
+The dataset is clearly not tidy. It has variables with almost no variation or with just a few values, e.g. all those wrongly perfomerd lifts with kurtosis and skeweness in movement. I do not consider them being good general predictors, as they are specific for specific type of mistake made, and I think that the rest of data connected to other aspects of movement is robust enough for good predictions. Preliminary analyses indeed showed that the "skewed" variables are not necessary for successfull predictions. I also remove variables not useful for prediction aiming on barbell lifts performance quality like timestamps or person identifier. The final cleaned datasets contain only 53 variables (the outcome and 52 predictors).
+```{r data_cleaning_a, message=F}
+#remove near zero variables
+nuly <-nearZeroVar(a, saveMetrics=TRUE)
+a_nzv<-a[,nuly[4]==F]
+
+# remove variables that are in huge majority of cases just NA (© Just Markham)
+a_nas <- sapply(a_nzv, function(x) mean(is.na(x))) > 0.95
+a_clean <- a_nzv[, a_nas==F]
+
+
+#remove first 6 variables as they are not useful for prediction aiming on barbell lifts performance quality
+a_final <- a_clean[7:length(a_clean)]
+```
+
+Exactly the same alterations have to be done to the test dataset, __b__.
+```{r data_cleaning_b, message=F}
+
+#remove near zero variables
+b_nzv<-b[,nuly[4]==F]
+
+
+# remove variables that are in huge majority of cases just NA (© Just Markham)
+b_clean <- b_nzv[, a_nas==F]
+
+
+#remove first 6 variables as they are not useful for prediction aiming on barbell lifts performance quality
+b_final <- b_clean[7:length(b_clean)]
+
+```
+
+
+## Partitioning
+I split the original training dataset, __a__, into  training (60% of data) and testing (40% of data) part. This allows me to test models before trying them on original test dataset.
+```{r}
+# partitioning training dataset into training and testing parts
+a_partitions <- createDataPartition(a_final$classe, p=0.6, list=F)
+a_tr <- a_final[a_partitions,] # a_train
+a_ts <- a_final[-a_partitions,] # a_test
+
+```
+
+
+# MODELS
+Here I describe what models I chose, why I chose them and how good they perform. The out of sample errors are simply 1-accuracy of model as estimated via confusion matrix, thus I give only the accuracy itself. One can easily calculate out of sample errors, if one wishes to.
+
+## Classification tree
+I start with simple classificatin tree, as it nicely shows main decision points in data. Preliminary model testing showed that function _train()_ from caret package yeilded far worse accuracy then function _rpart()_ from eponymous package, thus I use _rpart()_. I fit the whole set of predictors and let all settings default.
+```{r class_tree, cache=T}
+#classification tree
+mod_class <- rpart(classe ~ ., data=a_tr, method="class")
+
+#plot it - for bigger plot see link below
+fancyRpartPlot(mod_class)
+
+# predict
+pred_class <- predict(mod_class, newdata=a_ts, type="class")
+
+#how good is model prediction?
+confClass <- confusionMatrix(pred_class, a_ts$classe)
+        #I've created this object so I can refer to it in summary text below
+        #to get numbers printed without typing them manualy
+confClass
+```
+For bigger plot please click [here (74 KB png in my Github repository)](https://raw.githubusercontent.com/lipnerova/08_Practical_Machine_Learning/master/class_tree.png).
+The classification tree accuracy is `r paste (round(confClass$overall[[1]], 3))` (95% CI `r paste (round(confClass$overall[[3]], 3))` to `r paste (round(confClass$overall[[4]],3))`), which is not acceptable.
+
+## Random forests
+The classification trees do not show good accuracy, so I decide to try more sophisticated yet time efficient and understandable approach, the random forests. I fit the whole set of predictors and let all settings default.
+```{r random_forest, cache=T}
+#random forests
+mod_rf <- randomForest(classe ~. , data=a_tr)
+
+# predict
+pred_rf <- predict(mod_rf, a_ts, type = "class")
+
+#how good is model prediction?
+confRF <- confusionMatrix(pred_rf, a_ts$classe)
+        #I've created this object so I can refer to it in summary text below
+        #to get numbers printed without typing them manualy
+confRF
+```
+The random forests accuracy is `r paste (round(confRF$overall[[1]], 3))` (95% CI `r paste (round(confRF$overall[[3]], 3))` to `r paste (round(confRF$overall[[4]], 3))`), which is far better and enough good for me.
+
+## Summary of models
+The classification tree accuracy is `r paste (round(confClass$overall[[1]], 3))` (95% CI `r paste (round(confClass$overall[[3]], 3))` to `r paste (round(confClass$overall[[4]],3))`).
+
+The random forests accuracy is `r paste (round(confRF$overall[[1]], 3))` (95% CI `r paste (round(confRF$overall[[3]], 3))` to `r paste (round(confRF$overall[[4]], 3))`). Such accuracy is high enough and should also stay high enough for original test dataset.
+
+Thus I decide to probe original testing dataset, __b__, with random forests method with default settings.
+
+
+# Final model on testing dataset
+As the better model is that one with random forests method, I use it for evaluating against original test dataset __b__.
+```{r random_forest_b, cache=T}
+#predict from testing dataset:
+pred_b <- predict(mod_rf, b, type = "class")
+pred_b
+```
+After submitting this result to quiz grader, I got all predictions correct, e.g. 100% accepted. Thus the model works fine.
